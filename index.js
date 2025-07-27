@@ -66,12 +66,16 @@ const fileSetup = async () => {
 
 if (isMainThread) {
   (async () => {
+    console.time("diskRead");
+
     const finalOffsets = await fileSetup();
     const threads = new Set();
     const agg = new Map();
     for (let slice of finalOffsets) {
       threads.add(
-        new Worker(__filename, { workerData: { file: fileName, ...slice } })
+        new Worker(__filename, {
+          workerData: { file: fileName, ...slice },
+        })
       );
     }
 
@@ -81,15 +85,13 @@ if (isMainThread) {
       });
       worker.on("exit", () => {
         threads.delete(worker);
-        console.log(`Thread exiting, ${threads.size} running...`);
         if (threads.size === 0) {
-          console.log("All threads ended");
           printCompiledResults(agg);
+          console.timeEnd("diskRead");
         }
       });
       worker.on("message", (map) => {
         // serialise to avoid race conditions
-        console.log("Resolved: ", map.size);
         map.forEach((value, key) => {
           const prev = agg.get(key);
           if (prev) {
@@ -109,15 +111,16 @@ if (isMainThread) {
   })();
 } else {
   const { start, end, file } = workerData;
-  const stream = fs.createReadStream(file, { start, end });
-  const lineStream = readline.createInterface(stream);
-
   const aggregations = new Map();
+  const stream = fs.createReadStream(file, { start, end });
 
-  lineStream.on("line", (line) => {
-    const [stationName, temperatureStr] = line.split(";");
-    // use integers for computation to avoid loosing precision
-    const temperature = Math.floor(parseFloat(temperatureStr) * 10);
+  const stationName = Buffer.allocUnsafe(100);
+  const number = Buffer.allocUnsafe(5);
+  let stationMode = true;
+  let stationLen = 0;
+  let numLen = 0;
+
+  const processLine = (stationName, temperature) => {
     const existing = aggregations.get(stationName);
     if (existing) {
       existing.min = Math.min(existing.min, temperature);
@@ -132,9 +135,67 @@ if (isMainThread) {
         count: 1,
       });
     }
+  };
+
+  const processChunk = (chunk) => {
+    const chunkSize = chunk.length;
+    for (let i = 0; i < chunkSize; i++) {
+      if (chunk[i] == 0x3a) {
+        // ;
+        stationMode = false;
+      } else if (chunk[i] == 0x0a) {
+        // next line
+        // process station and number
+        const stationStr = stationName.toString("utf8", 0, stationLen);
+        const temp = parseFloat(number.toString("ascii", 0, numLen));
+        stationMode = true;
+        stationLen = 0;
+        numLen = 0;
+
+        processLine(stationStr, temp);
+      } else {
+        if (stationMode) {
+          stationLen++;
+          stationName[i] = chunk[i];
+        } else {
+          numLen++;
+          number[i] = chunk[i];
+        }
+      }
+    }
+  };
+
+  stream.on("data", (chunk) => {
+    processChunk(chunk);
+    // const last = chunk.slice(chunk.length - 50);
+    // console.log(last);
+    // console.log(last.toString());
+    // stream.destroy();
+    // let chunkBuffer = Buffer.alloc(0);
+    // while (null != (chunkBuffer = stream.read())) {
+    //   chunkBuffer = Buffer.concat([leftOver, chunkBuffer ?? Buffer.alloc(0)]);
+    //   let lastLFIndex = 0;
+    //   let curLFIndex = 0;
+    //   while (-1 < (curLFIndex = chunkBuffer.indexOf(0x0a, lastLFIndex))) {
+    //     const buf = chunkBuffer.slice(lastLFIndex, curLFIndex);
+    //     processLine(buf);
+    //     lastLFIndex = curLFIndex + 1;
+    //   }
+    //   leftOver = chunkBuffer.slice(lastLFIndex);
+    // }
+    // console.log("----------------------chunkBuffer");
+    // console.log(chunkBuffer.toString());
+    // // console.log(chunkBuffer);
+    // // console.log(chunkBuffer.indexOf(0x3b));
+    // // console.log(chunkBuffer.indexOf(0x0a));
+    // // console.log(chunkBuffer.slice(0, 13));
+    // // console.log(chunkBuffer.slice(14).toString());
+    // console.log("----------------------chunkBuffer");
+    // stream.destroy();
   });
 
-  lineStream.on("close", () => {
+  stream.on("end", () => {
+    // console.log("Processed in stream: ", aggregations.size);
     parentPort.postMessage(aggregations);
   });
 }
@@ -146,7 +207,7 @@ if (isMainThread) {
  */
 function printCompiledResults(aggregations) {
   console.log("Received in pcr: ", aggregations.size);
-  console.log(aggregations);
+  // console.log(aggregations);
   return;
   const sortedStations = Array.from(aggregations.keys()).sort();
 
