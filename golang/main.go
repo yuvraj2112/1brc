@@ -51,9 +51,7 @@ func main() {
 	defer file.Close()
 	
 	scanner := bufio.NewScanner(file)
-	if err := scanner.Err(); err != nil {
-		log.Fatal(err)
-	}
+	check(scanner.Err())
 
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -63,9 +61,7 @@ func main() {
 		}
 
 		t, e := strconv.ParseFloat(temp, 32)
-		if e != nil {
-			log.Fatal(e)
-		}
+		check(e)
 		updateMap(city, float32(t))
 	}
 	fmt.Println(mapper)
